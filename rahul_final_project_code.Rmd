@@ -1,0 +1,275 @@
+---
+title: "final_project"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(boot)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+```
+
+```{r}
+compas_scores <- read.csv("compas-scores-raw.csv")
+recid <- read.csv("propublica_data_for_fairml.csv")
+
+head(compas_scores)
+head(recid)
+```
+
+```{r}
+# side by side plots
+p1 <- ggplot(compas_scores, aes(x = Sex_Code_Text, y = DecileScore)) + 
+  geom_boxplot() + xlab("Gender") + ylab("COMPAS Decile Score")
+p2 <- ggplot(recid, aes(x = factor(Female, labels = c("Male", "Female")), y = Two_yr_Recidivism)) +
+  stat_summary(fun = mean, geom = "bar") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  ylab("Recidivism Rate (Proportion)") +
+  xlab("Gender")
+grid.arrange(p1, p2, ncol=2, top = "Comparison of COMPAS Risk Score and Recidivism Rate by Gender")
+```
+```{r}
+race_cols <- c("African_American", "Asian", "Hispanic",
+               "Native_American", "Other")
+
+recid$Race <- race_cols[ max.col(recid[, race_cols], ties.method = "first") ]
+recid$Race <- factor(recid$Race)
+
+compas_scores <- compas_scores[compas_scores$Ethnic_Code_Text %in% 
+                                 c("African-American", "Asian", "Hispanic", 
+                                   "Native American", "Caucasian", "Other"), ]
+```
+
+```{r}
+p1 <- ggplot(compas_scores, aes(x = Ethnic_Code_Text, y = DecileScore)) + 
+  geom_boxplot() + xlab("Race") + ylab("COMPAS Decile Score")
+p2 <- ggplot(recid, aes(x = Race, y = Two_yr_Recidivism)) +
+  stat_summary(fun = mean, geom = "bar") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  ylab("Recidivism Rate (Proportion)") +
+  xlab("Race")
+grid.arrange(p1, p2, nrow=2, top = "Comparison of COMPAS Risk Score and Recidivism Rate by Race")
+```
+```{r}
+library(lubridate)
+compas_scores$dob <- mdy(compas_scores$DateOfBirth)
+compas_scores$screen <- mdy_hm(compas_scores$Screening_Date)
+```
+
+```{r}
+compas_scores$screen_date <- as.Date(compas_scores$screen)
+compas_scores$AgeAtScreen <- as.numeric(
+  (compas_scores$screen_date - compas_scores$dob) / 365.25
+)
+
+compas_scores$Age_Category <- cut(
+  compas_scores$AgeAtScreen,
+  breaks = c(-Inf, 25, 45, Inf),
+  labels = c("Below_25", "Between_25_45", "Above_45"),
+  right = FALSE
+)
+```
+
+```{r}
+recid$Age_Category <- with(recid, ifelse(
+  Age_Below_TwentyFive == 1, "Below_25",
+  ifelse(Age_Above_FourtyFive == 1, "Above_45", "Between_25_45")
+))
+recid$Age_Category <- factor(recid$Age_Category,
+                             levels = c("Below_25", "Between_25_45", "Above_45"))
+```
+
+```{r}
+p1 <- ggplot(compas_scores, aes(x = Age_Category, y = DecileScore)) + 
+  geom_boxplot() + xlab("Age Category") + ylab("COMPAS Decile Score")
+p2 <- ggplot(recid, aes(x = Age_Category, y = Two_yr_Recidivism)) +
+  stat_summary(fun = mean, geom = "bar") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  ylab("Recidivism Rate (Proportion)") +
+  xlab("Age Category")
+grid.arrange(p1, p2, nrow=2, top = "Comparison of COMPAS Risk Score and Recidivism Rate by Age Category")
+```
+
+```{r}
+# ---- bootstrap helpers ----
+bootstrap_diffs <- function(x1, x2, B) {
+  n1 <- length(x1); n2 <- length(x2)
+  idx1 <- matrix(sample.int(n1, n1 * B, replace = TRUE), nrow = n1)
+  idx2 <- matrix(sample.int(n2, n2 * B, replace = TRUE), nrow = n2)
+  boot_mat1 <- matrix(x1[idx1], nrow = n1)
+  boot_mat2 <- matrix(x2[idx2], nrow = n2)
+  colMeans(boot_mat1) - colMeans(boot_mat2)
+}
+
+bootstrap_diff_CI_percentile <- function(x1, x2, B = 2000, alpha = 0.05) {
+  diffs <- bootstrap_diffs(x1, x2, B)
+  q <- quantile(diffs, c(alpha/2, 1-alpha/2), names = FALSE)
+  list(ci = q, diffs = diffs)
+}
+
+bootstrap_diff_CI_basic <- function(x1, x2, B = 2000, alpha = 0.05) {
+  diffs <- bootstrap_diffs(x1, x2, B)
+  theta_hat <- mean(x1) - mean(x2)
+  q <- quantile(diffs, c(alpha/2, 1-alpha/2), names = FALSE)
+  ci <- c(2*theta_hat - q[2], 2*theta_hat - q[1])
+  list(ci = ci, diffs = diffs, theta_hat = theta_hat)
+}
+
+# ---- studentized (bootstrap-t) for difference of means ----
+# We estimate se(theta_hat) via bootstrap within each outer resample.
+# For speed we compute studentized z* = (theta*_b - theta_hat) / se*_b,
+# where se*_b estimated by bootstrap-within-bootstrap with small B2.
+bootstrap_diff_CI_studentized <- function(x1, x2, B = 2000, B2 = 200, alpha = 0.05) {
+  theta_hat <- mean(x1) - mean(x2)
+  n1 <- length(x1); n2 <- length(x2)
+  # outer bootstrap diffs
+  diffs <- bootstrap_diffs(x1, x2, B)
+  # compute se*_b for each outer replicate by resampling within that bootstrap sample (approx)
+  # Build outer bootstrap samples as matrices (to reuse indices)
+  idx1_outer <- matrix(sample.int(n1, n1 * B, replace = TRUE), nrow = n1)
+  idx2_outer <- matrix(sample.int(n2, n2 * B, replace = TRUE), nrow = n2)
+  outer_mat1 <- matrix(x1[idx1_outer], nrow = n1)
+  outer_mat2 <- matrix(x2[idx2_outer], nrow = n2)
+  # for each outer column b, estimate se by resampling rows from that column B2 times
+  se_stars <- numeric(B)
+  for (b in seq_len(B)) {
+    samp1 <- outer_mat1[, b]
+    samp2 <- outer_mat2[, b]
+    # small inner bootstrap to estimate se of mean difference for this outer sample
+    inner_idx1 <- matrix(sample.int(n1, n1 * B2, replace = TRUE), nrow = n1)
+    inner_idx2 <- matrix(sample.int(n2, n2 * B2, replace = TRUE), nrow = n2)
+    inner_means1 <- colMeans(matrix(samp1[inner_idx1], nrow = n1))
+    inner_means2 <- colMeans(matrix(samp2[inner_idx2], nrow = n2))
+    inner_diffs <- inner_means1 - inner_means2
+    se_stars[b] <- sd(inner_diffs)
+  }
+  # studentized statistics
+  z_stars <- (diffs - theta_hat) / se_stars
+  qz <- quantile(z_stars, c(1 - alpha/2, alpha/2), names = FALSE) # note ordering for inversion
+  # studentized CI: [theta_hat - q_{1-alpha/2} * se_hat, theta_hat - q_{alpha/2} * se_hat]
+  # estimate se_hat from original data analytically:
+  se_hat <- sqrt(var(x1)/length(x1) + var(x2)/length(x2))
+  ci <- c(theta_hat - qz[1] * se_hat, theta_hat - qz[2] * se_hat)
+  list(ci = ci)
+}
+
+# ---- single-delta simulation with diagnostics ----
+simulate_one_delta_with_diag <- function(delta_true, rng1, rng2,
+                                        n1 = 30, n2 = 30, S = 400,
+                                        B = 2000, B2 = 200,
+                                        include_studentized = TRUE) {
+  pct_cov <- basic_cov <- stud_cov <- logical(S)
+  pct_width <- basic_width <- stud_width <- numeric(S)
+  sym_measure <- numeric(S)
+  centers_pct <- centers_basic <- numeric(S)
+  bias_obs <- numeric(S)
+  for (s in seq_len(S)) {
+    x1 <- rng1(n1)
+    x2 <- rng2(n2) + delta_true
+    theta_hat <- mean(x1) - mean(x2)
+    bias_obs[s] <- theta_hat - delta_true
+
+    pct <- bootstrap_diff_CI_percentile(x1, x2, B, alpha = 0.05)
+    basic <- bootstrap_diff_CI_basic(x1, x2, B, alpha = 0.05)
+
+    pct_cov[s] <- (pct$ci[1] <= delta_true && delta_true <= pct$ci[2])
+    basic_cov[s] <- (basic$ci[1] <= delta_true && delta_true <= basic$ci[2])
+
+    pct_width[s] <- diff(pct$ci)
+    basic_width[s] <- diff(basic$ci)
+    centers_pct[s] <- mean(pct$ci)     # center of percentile CI
+    centers_basic[s] <- mean(basic$ci) # center of basic CI
+
+    # symmetry measure: q_low + q_high - 2*theta_hat (should be ~0 if symmetric around theta_hat)
+    q <- quantile(pct$diffs, c(0.025, 0.975), names = FALSE)
+    sym_measure[s] <- q[1] + q[2] - 2*theta_hat
+
+    if (include_studentized) {
+      stud <- bootstrap_diff_CI_studentized(x1, x2, B = B, B2 = B2, alpha = 0.05)
+      stud_cov[s] <- (stud$ci[1] <= delta_true && delta_true <= stud$ci[2])
+      stud_width[s] <- diff(stud$ci)
+    }
+  }
+
+  out <- data.frame(
+    delta = delta_true,
+    coverage_percentile = mean(pct_cov),
+    coverage_basic = mean(basic_cov),
+    coverage_studentized = if (include_studentized) mean(stud_cov) else NA,
+    avg_width_pct = mean(pct_width),
+    avg_width_basic = mean(basic_width),
+    avg_center_diff = mean(centers_pct - centers_basic),
+    mean_symmetry = mean(sym_measure),
+    mean_bias = mean(bias_obs)
+  )
+  out
+}
+
+# ---- run for many deltas and plot ----
+rng_normal <- function(n) rnorm(n, 0, 1)
+deltas <- seq(0, 1, by = 0.1)
+results_list <- lapply(deltas, function(d) simulate_one_delta_with_diag(
+  delta_true = d, rng1 = rng_normal, rng2 = rng_normal,
+  n1 = 30, n2 = 30, S = 100, B = 1000, B2 = 100, include_studentized = TRUE
+))
+results <- do.call(rbind, results_list)
+
+# reshape for plotting coverage vs delta
+df_long <- results |>
+  pivot_longer(cols = starts_with("coverage_"),
+               names_to = "method", values_to = "coverage")
+
+ggplot(df_long, aes(x = delta, y = coverage, color = method)) +
+  geom_line(size = 1.1) + geom_point(size = 2) +
+  geom_hline(yintercept = 0.95, linetype = "dashed") +
+  labs(x = "True delta", y = "Coverage", title = "Coverage vs delta (percentile, basic, studentized)") +
+  theme_minimal(base_size = 13)
+```
+```{r}
+head(recid)
+```
+
+```{r}
+diff_means_score <- function(data, indices) {
+  d <- data[indices, ]
+  mean_m <- mean(d$DecileScore[d$Sex_Code_Text == "Male"], na.rm = TRUE)
+  mean_f <- mean(d$DecileScore[d$Sex_Code_Text == "Female"], na.rm = TRUE)
+  est <- mean_m - mean_f
+  se <- sqrt(
+    var(d$DecileScore[d$Sex_Code_Text == "Male"]) / sum(d$Sex_Code_Text == "Male") +
+    var(d$DecileScore[d$Sex_Code_Text == "Female"]) / sum(d$Sex_Code_Text == "Female")
+  )
+  return(c(est, se))
+}
+
+diff_means_recid <- function(data, indices) {
+  d <- data[indices, ]
+  mean_m <- mean(d$Two_yr_Recidivism[d$Female == 0], na.rm = TRUE)
+  mean_f <- mean(d$Two_yr_Recidivism[d$Female == 1], na.rm = TRUE)
+  est <- mean_m - mean_f
+  se <- sqrt(
+    var(d$Two_yr_Recidivism[d$Female == 0]) / sum(d$Female == 0) +
+    var(d$Two_yr_Recidivism[d$Female == 1]) / sum(d$Female == 1)
+  )
+  return(c(est, se))
+}
+```
+
+```{r}
+set.seed(406460406)
+boot_score <- boot(
+  data = compas_scores,
+  statistic = diff_means_score,
+  R = 2000
+)
+boot_recid <- boot(
+  data = recid,
+  statistic = diff_means_recid,
+  R = 2000
+)
+boot.ci(boot_score, type = "stud")
+boot.ci(boot_recid, type = "stud")
+```
+
