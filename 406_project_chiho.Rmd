@@ -1,0 +1,124 @@
+---
+title: "406Project"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(boot)
+library(dplyr)
+library(broom)
+library(ggplot2)
+library(gridExtra)
+```
+
+```{r}
+compas <- read.csv("compas-scores-raw.csv")
+
+# Clean variables
+compas_clean <- compas_scores %>%
+  mutate(
+    # parse dates properly
+    dob = as.Date(DateOfBirth, format = "%m/%d/%y"),
+    screen_date = as.Date(sub(" .*", "", Screening_Date), format = "%m/%d/%y"),
+    
+    # age in years at time of screening
+    age = as.numeric(difftime(screen_date, dob, units = "days")) / 365.25,
+    
+    # factors for predictors
+    race  = factor(Ethnic_Code_Text),
+    sex   = factor(Sex_Code_Text),
+    # use LegalStatus as a proxy for charge type (has multiple levels)
+    charge = factor(LegalStatus),
+    
+    # main parameter of interest: non-Caucasian vs Caucasian
+    race_nonwhite = ifelse(race == "Caucasian", 0, 1)
+  ) %>%
+  filter(
+    !is.na(DecileScore),
+    !is.na(age),
+    !is.na(race_nonwhite),
+    !is.na(sex),
+    !is.na(charge)
+  )
+
+# Fit regression model
+model <- lm(
+  DecileScore ~ race_nonwhite + age + sex + charge,
+  data = compas_clean
+)
+
+summary(model)
+
+# Estimate of B_race
+B_race <- coef(model)["race_nonwhite"]
+
+# 95% CI using standard OLS theory
+ci_B_race <- confint(model)["race_nonwhite", ]
+ci_B_race
+
+# Hypothesis test: H0: B_race = 0.1 vs Ha: B_race ≠ 0.1
+se_B_race <- summary(model)$coef["race_nonwhite", "Std. Error"]
+t_stat    <- (B_race - 0.1) / se_B_race
+df        <- summary(model)$df[2]
+p_value   <- 2 * pt(-abs(t_stat), df)
+
+list(
+  B_race_hat  = B_race,
+  CI_95       = ci_B_race,
+  t_statistic = t_stat,
+  df          = df,
+  p_value     = p_value
+)
+
+
+# Diagnostics
+diag_df <- augment(model)
+diag_df$cooksd <- cooks.distance(model)
+
+# Residuals vs Fitted
+p1 <- ggplot(diag_df, aes(.fitted, .resid)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(
+    title = "Residuals vs Fitted",
+    x = "Fitted values",
+    y = "Residuals"
+  )
+
+# Normal Q-Q plot
+p2 <- ggplot(diag_df, aes(sample = .std.resid)) +
+  stat_qq(alpha = 0.3) +
+  stat_qq_line(colour = "red") +
+  labs(title = "Normal Q-Q Plot")
+
+# Scale-Location plot (check for constant variance)
+p3 <- ggplot(diag_df, aes(.fitted, sqrt(abs(.std.resid)))) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(se = FALSE, colour = "red") +
+  labs(
+    title = "Scale-Location Plot",
+    x = "Fitted values",
+    y = "√|Standardized residuals|"
+  )
+
+top <- diag_df %>%
+  mutate(id = row_number()) %>%
+  arrange(desc(cooksd)) %>%
+  slice(1:50)
+
+p4 <- ggplot(diag_df, aes(seq_along(cooksd), cooksd)) +
+  geom_bar(stat = "identity") +
+  scale_y_log10() +
+  labs(
+    title = "Cook's Distance (log scale)",
+    x = "Observation",
+    y = "Cook's distance (log scale)"
+  )
+
+
+
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+```
