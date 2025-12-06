@@ -1,0 +1,303 @@
+---
+title: "anna_final_project_code"
+output: html_document
+---
+
+Libraries
+
+```{r}
+library(knitr)
+library(ggplot2)
+library(dplyr)
+```
+
+
+Simulations
+
+```{r}
+dat <- read.csv("compas-scores (1).csv", stringsAsFactors = FALSE)
+dat$age <- as.numeric(dat$age)
+dat$risk_group <- cut(dat$decile_score,
+                      breaks = c(-Inf, 3, 6, Inf),
+                      labels = c("Low", "Medium", "High"))
+dat <- dat[!is.na(dat$age) & !is.na(dat$risk_group), ]
+
+
+# compute ANOVA F-stat
+
+compute_F <- function(age, risk_group) {
+  summary(aov(age ~ risk_group))[[1]][["F value"]][1]
+}
+
+
+# permutation test function
+
+perm_test <- function(age, risk_group, B = 2000) {
+  theta_obs <- compute_F(age, risk_group)
+  n <- length(risk_group)
+  thetas <- numeric(B)
+  for (b in seq_len(B)) {
+    perm_group <- sample(risk_group, n, replace = FALSE)
+    thetas[b] <- compute_F(age, perm_group)
+  }
+  p_hat <- (1 + sum(thetas >= theta_obs)) / (B + 1)
+  return(p_hat)
+}
+
+
+# simulation functions
+
+simulate_type1 <- function(n, B = 200, nsim = 50) {
+  reject_count <- 0
+  for (i in 1:nsim) {
+    age <- rnorm(n, mean = 35, sd = 10)
+    group <- factor(sample(c("Low", "Medium", "High"), n, replace = TRUE))
+    pval <- perm_test(age, group, B)
+    reject_count <- reject_count + (pval < 0.05)
+  }
+  mean(reject_count / nsim)
+}
+
+simulate_power <- function(n, effect, B = 200, nsim = 50) {
+  reject_count <- 0
+  for (i in 1:nsim) {
+    group <- factor(sample(c("Low", "Medium", "High"), n, replace = TRUE))
+    means <- c(Low = 30, Medium = 30 + effect, High = 30 + 2*effect)
+    age <- rnorm(n, mean = means[group], sd = 10)
+    pval <- perm_test(age, group, B)
+    reject_count <- reject_count + (pval < 0.05)
+  }
+  mean(reject_count / nsim)
+}
+
+estimate_bias_mse <- function(n, effect, nsim = 50) {
+  F_vals <- numeric(nsim)
+  for (i in 1:nsim) {
+    group <- factor(sample(c("Low", "Medium", "High"), n, replace = TRUE))
+    means <- c(Low = 30, Medium = 30 + effect, High = 30 + 2*effect)
+    age <- rnorm(n, mean = means[group], sd = 10)
+    F_vals[i] <- compute_F(age, group)
+  }
+  true_F <- if (effect == 0) 1 else mean(F_vals)
+  bias <- mean(F_vals - true_F)
+  mse <- mean((F_vals - true_F)^2)
+  list(bias = bias, mse = mse)
+}
+
+
+# run simulations, create table
+
+set.seed(2025)
+effects <- 0:10
+nsim <- 50
+n_per_group <- 100
+B <- 200
+
+sim_results <- data.frame(
+  effect = effects,
+  type1_error = NA,
+  power = NA,
+  bias = NA,
+  mse = NA
+)
+
+for (i in seq_along(effects)) {
+  e <- effects[i]
+  n <- n_per_group * 3
+  
+  # Type I error: compute for effect = 0 only
+  sim_results$type1_error[i] <- if (e == 0) simulate_type1(n, B, nsim) else NA
+  # Power: compute for effect > 0
+  sim_results$power[i] <- if (e > 0) simulate_power(n, e, B, nsim) else NA
+  # Bias & MSE: compute for all
+  bm <- estimate_bias_mse(n, e, nsim)
+  sim_results$bias[i] <- bm$bias
+  sim_results$mse[i] <- bm$mse
+}
+
+sim_results
+
+
+# plots
+
+# Power vs Effect
+plot(sim_results$effect, sim_results$power, type = "b", pch = 19,
+     xlab = "Effect Size (Years)", ylab = "Power",
+     main = "Permutation Test Power Across Effect Sizes", ylim = c(0,1))
+abline(h = 0.8, col = "red", lty = 2)
+legend("bottomright", legend = "80% Power", col = "red", lty = 2)
+
+# Type I error
+plot(sim_results$effect, sim_results$type1_error, type = "b", pch = 19, col = "blue",
+     xlab = "Effect Size", ylab = "Type I Error",
+     main = "Type I Error Under Null")
+abline(h = 0.05, col = "red", lty = 2)
+legend("topright", legend = "Nominal α = 0.05", col = "red", lty = 2)
+
+# Bias & MSE
+par(mar = c(5, 4, 4, 4) + 0.1)
+plot(sim_results$effect, sim_results$bias, type = "b", pch = 19, col = "blue",
+     xlab = "Effect Size", ylab = "Bias",
+     main = "Bias and MSE of F-Statistic")
+par(new = TRUE)
+plot(sim_results$effect, sim_results$mse, type = "b", pch = 17, col = "red",
+     axes = FALSE, xlab = "", ylab = "", ylim = range(sim_results$mse))
+axis(side = 4)
+mtext("MSE", side = 4, line = 3)
+legend("topleft", legend = c("Bias","MSE"), col = c("blue","red"), pch = c(19,17))
+
+
+#formatting
+sim_results_table <- sim_results
+sim_results_table$type1_error <- round(sim_results_table$type1_error, 3)
+sim_results_table$power <- round(sim_results_table$power, 2)
+sim_results_table$bias <- signif(sim_results_table$bias, 3)
+sim_results_table$mse <- round(sim_results_table$mse, 2)
+
+# replace NAs for cleaner presentation
+sim_results_table$type1_error[is.na(sim_results_table$type1_error)] <- "-"
+sim_results_table$power[is.na(sim_results_table$power)] <- "-"
+
+# rename columns
+colnames(sim_results_table) <- c(
+  "Effect Size (Years)", 
+  "Type I Error", 
+  "Power", 
+  "Bias of F-Statistic", 
+  "MSE of F-Statistic"
+)
+
+# table
+kable(sim_results_table, align = "c", caption = "Summary of Simulation Results for Permutation Test Across Effect Sizes")
+
+```
+
+Analysis
+
+```{r}
+
+# ensure age is numeric
+dat$age <- as.numeric(dat$age)
+
+# create COMPAS risk groups
+dat$risk_group <- cut(
+  dat$decile_score,
+  breaks = c(-Inf, 4, 7, Inf),
+  labels = c("Low", "Medium", "High")
+)
+
+# remove missing values
+dat <- dat[!is.na(dat$age) & !is.na(dat$risk_group), ]
+
+
+# compute F-statistic
+compute_F <- function(age, group) {
+  summary(aov(age ~ group))[[1]][["F value"]][1]
+}
+
+
+# permutation test
+perm_test <- function(age, group, B = 2000) {
+  theta_obs <- compute_F(age, group)
+  n <- length(group)
+  thetas <- numeric(B)
+  
+  for (b in seq_len(B)) {
+    perm_group <- sample(group, n, replace = FALSE)
+    thetas[b] <- compute_F(age, perm_group)
+  }
+  
+  p_hat <- (1 + sum(thetas >= theta_obs)) / (B + 1)
+  list(
+    observed_F = theta_obs,
+    p_value = p_hat,
+    perm_distribution = thetas
+  )
+}
+
+
+# run permutation test on COMPAS dataset
+set.seed(2025)
+result <- perm_test(dat$age, dat$risk_group, B = 2000)
+
+result$observed_F
+result$p_value
+
+
+#permutation distribution plot
+hist(result$perm_distribution,
+     breaks = 40,
+     main = "Permutation Distribution of F-Statistic",
+     xlab = "F-Statistic")
+
+abline(v = result$observed_F, col = "red", lwd = 2)
+legend("topright", legend = "Observed F", col = "red", lwd = 2)
+
+
+#summary statistics of age by risk category
+aggregate(age ~ risk_group, data = dat, summary)
+
+
+#table of group means, medians, SDs
+
+age_summary <- dat %>%
+  group_by(risk_group) %>%
+  summarise(
+    n = n(),
+    mean_age = mean(age),
+    median_age = median(age),
+    sd_age = sd(age),
+    min_age = min(age),
+    max_age = max(age)
+  )
+
+age_summary
+
+
+#bxplot of age by risk group
+boxplot(age ~ risk_group, data = dat,
+        col = c("lightblue","lightgreen","lightpink"),
+        main = "Age Distributions by COMPAS Risk Group",
+        ylab = "Age")
+
+
+#kernel density plot of age by risk group
+
+ggplot(dat, aes(x = age, fill = risk_group)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Kernel Density of Age Across COMPAS Risk Categories",
+    x = "Age",
+    y = "Density",
+    fill = "Risk Group"
+  ) +
+  theme_minimal()
+
+
+#nicely formatted summary table
+age_summary <- aggregate(age ~ risk_group, dat, function(x) {
+  c(
+    N = length(x),
+    Mean = round(mean(x), 2),
+    Median = round(median(x), 2),
+    SD = round(sd(x), 2),
+    Min = min(x),
+    Max = max(x)
+  )
+})
+
+#reshape into nice data frame
+output <- data.frame(
+  Risk_Group = age_summary$risk_group,
+  N = age_summary$age[, "N"],
+  Mean_Age = age_summary$age[, "Mean"],
+  Median_Age = age_summary$age[, "Median"],
+  SD = age_summary$age[, "SD"],
+  Min = age_summary$age[, "Min"],
+  Max = age_summary$age[, "Max"]
+)
+
+output
+
+
+```
