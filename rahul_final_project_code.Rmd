@@ -18,6 +18,7 @@ recid <- read.csv("propublica_data_for_fairml.csv")
 head(compas_scores)
 head(recid)
 ```
+Initial Plotting
 
 ```{r}
 # side by side plots
@@ -91,6 +92,7 @@ p2 <- ggplot(recid, aes(x = Age_Category, y = Two_yr_Recidivism)) +
   xlab("Age Category")
 grid.arrange(p1, p2, nrow=2, top = "Comparison of COMPAS Risk Score and Recidivism Rate by Age Category")
 ```
+Simulations
 
 ```{r}
 # ---- bootstrap helpers ----
@@ -230,6 +232,7 @@ ggplot(df_long, aes(x = delta, y = coverage, color = method)) +
 ```{r}
 head(recid)
 ```
+Analysis
 
 ```{r}
 diff_means_score <- function(data, indices) {
