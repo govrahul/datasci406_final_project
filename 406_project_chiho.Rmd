@@ -10,6 +10,7 @@ library(dplyr)
 library(broom)
 library(ggplot2)
 library(gridExtra)
+library(splines)
 ```
 
 ```{r}
@@ -71,6 +72,23 @@ list(
   p_value     = p_value
 )
 
+model_poly <- lm(
+  DecileScore ~ race_nonwhite + age + I(age^2) + sex + charge,
+  data = compas_clean
+)
+
+summary(model_poly)
+
+# Extract race coefficient
+B_race_poly <- coef(model_poly)["race_nonwhite"]
+ci_B_race_poly <- confint(model_poly)["race_nonwhite", ]
+
+list(
+  model = "Polynomial age (degree 2)",
+  B_race_hat = B_race_poly,
+  CI_95 = ci_B_race_poly
+)
+
 
 # Diagnostics
 diag_df <- augment(model)
@@ -92,7 +110,7 @@ p2 <- ggplot(diag_df, aes(sample = .std.resid)) +
   stat_qq_line(colour = "red") +
   labs(title = "Normal Q-Q Plot")
 
-# Scale-Location plot (check for constant variance)
+# Scale-Location plot
 p3 <- ggplot(diag_df, aes(.fitted, sqrt(abs(.std.resid)))) +
   geom_point(alpha = 0.3) +
   geom_smooth(se = FALSE, colour = "red") +
@@ -118,6 +136,10 @@ p4 <- ggplot(diag_df, aes(seq_along(cooksd), cooksd)) +
 
 
 
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+```
 
 grid.arrange(p1, p2, p3, p4, ncol = 2)
 
